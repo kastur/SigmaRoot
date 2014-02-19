@@ -1,0 +1,9 @@
+[submodule "sigma"]
+	path = sigma
+	url = https://github.com/kastur/Sigma
+[submodule "asmack"]
+	path = asmack
+	url = https://github.com/kastur/ASmack
+[submodule "nanohttpd"]
+	path = nanohttpd
+	url = https://github.com/NanoHttpd/nanohttpd.git

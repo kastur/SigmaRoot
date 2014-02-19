@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="ProjectModuleManager">
+    <modules>
+      <module fileurl="file://$PROJECT_DIR$/asmack/asmack.iml" filepath="$PROJECT_DIR$/asmack/asmack.iml" />
+      <module fileurl="file://$PROJECT_DIR$/nanohttpd/core/src/main/nanohttpd-core.iml" filepath="$PROJECT_DIR$/nanohttpd/core/src/main/nanohttpd-core.iml" />
+      <module fileurl="file://$PROJECT_DIR$/nanohttpd/webserver/src/main/nanohttpd-main.iml" filepath="$PROJECT_DIR$/nanohttpd/webserver/src/main/nanohttpd-main.iml" />
+      <module fileurl="file://$PROJECT_DIR$/sigma/sigma.iml" filepath="$PROJECT_DIR$/sigma/sigma.iml" />
+    </modules>
+  </component>
+</project>
+

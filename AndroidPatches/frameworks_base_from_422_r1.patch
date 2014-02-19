@@ -1,0 +1,734 @@
+diff --git a/Android.mk b/Android.mk
+index eae49ef..c39f901 100644
+--- a/Android.mk
++++ b/Android.mk
+@@ -707,33 +707,6 @@ include $(BUILD_DROIDDOC)
+ # explicitly specify that ds depends on framework-res and any generated docs
+ $(full_target): framework-res-package-target
+ 
+-
+-#==== reference docs for GCM =======================
+-
+-include $(CLEAR_VARS)
+-#
+-gcm_docs_src_files += \
+-        $(call all-java-files-under, ../../vendor/unbundled_google/libs/gcm/gcm-client/src) \
+-        $(call all-java-files-under, ../../vendor/unbundled_google/libs/gcm/gcm-server/src) \
+-        $(call all-html-files-under, ../../vendor/unbundled_google/libs/gcm/gcm-client/src) \
+-        $(call all-html-files-under, ../../vendor/unbundled_google/libs/gcm/gcm-server/src) \
+-
+-LOCAL_SRC_FILES := $(gcm_docs_src_files)
+-LOCAL_MODULE_TAGS := optional
+-LOCAL_MODULE:= online-gcm-ref
+-LOCAL_MODULE_CLASS := JAVA_LIBRARIES
+-LOCAL_IS_HOST_MODULE := false
+-
+-LOCAL_DROIDDOC_CUSTOM_TEMPLATE_DIR := build/tools/droiddoc/templates-sdk
+-
+-LOCAL_DROIDDOC_OPTIONS := \
+-        -toroot / \
+-        -gcmref \
+-        -hdf android.whichdoc online \
+-        -hdf template.showLanguageMenu true
+-
+-include $(BUILD_DROIDDOC)
+-
+ # ==== docs that have all of the stuff that's @hidden =======================
+ include $(CLEAR_VARS)
+ 
+diff --git a/api/current.txt b/api/current.txt
+index 6b893d5..7ca3589 100644
+--- a/api/current.txt
++++ b/api/current.txt
+@@ -9965,6 +9965,7 @@ package android.hardware {
+   }
+ 
+   public final class Sensor {
++    method public int getHandle();
+     method public float getMaximumRange();
+     method public int getMinDelay();
+     method public java.lang.String getName();
+@@ -10085,6 +10086,11 @@ package android.hardware {
+     field public static final float STANDARD_GRAVITY = 9.80665f;
+   }
+ 
++  public class SystemSensorManager extends android.hardware.SensorManager {
++    method public static int getServerHandle();
++    method public int pushSensorEvent(int, float[], int, long);
++  }
++
+ }
+ 
+ package android.hardware.display {
+@@ -16220,8 +16226,10 @@ package android.os {
+     method public final int dataPosition();
+     method public final int dataSize();
+     method public final void enforceInterface(java.lang.String);
++    method public final int[] getObjectPositions();
+     method public final boolean hasFileDescriptors();
+     method public final byte[] marshall();
++    method public final int objectsCount();
+     method public static android.os.Parcel obtain();
+     method protected static final android.os.Parcel obtain(int);
+     method public final java.lang.Object[] readArray(java.lang.ClassLoader);
+@@ -16248,6 +16256,7 @@ package android.os {
+     method public final long readLong();
+     method public final void readLongArray(long[]);
+     method public final void readMap(java.util.Map, java.lang.ClassLoader);
++    method public final android.os.IBinder readObject(int);
+     method public final T readParcelable(java.lang.ClassLoader);
+     method public final android.os.Parcelable[] readParcelableArray(java.lang.ClassLoader);
+     method public final java.io.Serializable readSerializable();
+@@ -16288,6 +16297,7 @@ package android.os {
+     method public final void writeLongArray(long[]);
+     method public final void writeMap(java.util.Map);
+     method public final void writeNoException();
++    method public final void writeObject(int, android.os.IBinder);
+     method public final void writeParcelable(android.os.Parcelable, int);
+     method public final void writeParcelableArray(T[], int);
+     method public final void writeSerializable(java.io.Serializable);
+diff --git a/cmds/servicemanager/service_manager.c b/cmds/servicemanager/service_manager.c
+index 3314dc3..f95ba49 100644
+--- a/cmds/servicemanager/service_manager.c
++++ b/cmds/servicemanager/service_manager.c
+@@ -213,8 +213,10 @@ int svcmgr_handler(struct binder_state *bs,
+ //    ALOGI("target=%p code=%d pid=%d uid=%d\n",
+ //         txn->target, txn->code, txn->sender_pid, txn->sender_euid);
+ 
+-    if (txn->target != svcmgr_handle)
++    if (txn->target != svcmgr_handle) {
++        ALOGD("txn->target (%d) != svcmgr_handle. code %d\n", txn->target, txn->code);
+         return -1;
++    }
+ 
+     // Equivalent to Parcel::enforceInterface(), reading the RPC
+     // header with the strict mode policy mask and the interface name.
+diff --git a/core/java/android/app/ContextImpl.java b/core/java/android/app/ContextImpl.java
+index f895ccc..eedd3a9 100644
+--- a/core/java/android/app/ContextImpl.java
++++ b/core/java/android/app/ContextImpl.java
+@@ -451,7 +451,8 @@ class ContextImpl extends Context {
+ 
+         registerService(SENSOR_SERVICE, new ServiceFetcher() {
+                 public Object createService(ContextImpl ctx) {
+-                    return new SystemSensorManager(ctx.mMainThread.getHandler().getLooper());
++                    int serverHandle = SystemSensorManager.getServerHandle();
++                    return new SystemSensorManager(serverHandle, ctx.mMainThread.getHandler().getLooper());
+                 }});
+ 
+         registerService(STATUS_BAR_SERVICE, new ServiceFetcher() {
+@@ -1401,15 +1402,32 @@ class ContextImpl extends Context {
+     }
+ 
+     @Override
+-    public boolean bindService(Intent service, ServiceConnection conn,
+-            int flags) {
++    public boolean bindService(Intent service, ServiceConnection conn, int flags) {
+         warnIfCallingFromSystemProcess();
+         return bindService(service, conn, flags, UserHandle.getUserId(Process.myUid()));
+     }
+ 
+     /** @hide */
+     @Override
+-    public boolean bindService(Intent service, ServiceConnection conn, int flags, int userHandle) {
++    public boolean bindService(
++            Intent service,
++            ServiceConnection conn,
++            int flags,
++            int userHandle) {
++        return bindService(service, conn, flags, userHandle, ActivityManagerNative.getDefault());
++    }
++
++    public boolean bindService( Intent service, ServiceConnection conn, int flags, IActivityManager activityManager) {
++        return bindService(service, conn, flags, UserHandle.getUserId(Process.myUid()), activityManager);
++    }
++
++    /** @hide */
++    public boolean bindService(
++            Intent service,
++            ServiceConnection conn,
++            int flags,
++            int userHandle,
++            IActivityManager activityManager) {
+         IServiceConnection sd;
+         if (conn == null) {
+             throw new IllegalArgumentException("connection is null");
+@@ -1428,7 +1446,7 @@ class ContextImpl extends Context {
+                 flags |= BIND_WAIVE_PRIORITY;
+             }
+             service.setAllowFds(false);
+-            int res = ActivityManagerNative.getDefault().bindService(
++            int res = activityManager.bindService(
+                 mMainThread.getApplicationThread(), getActivityToken(),
+                 service, service.resolveTypeIfNeeded(getContentResolver()),
+                 sd, flags, userHandle);
+diff --git a/core/java/android/hardware/Sensor.java b/core/java/android/hardware/Sensor.java
+index e0c9d2c..94d83a8 100644
+--- a/core/java/android/hardware/Sensor.java
++++ b/core/java/android/hardware/Sensor.java
+@@ -194,7 +194,7 @@ public final class Sensor {
+         return mMinDelay;
+     }
+ 
+-    int getHandle() {
++    public int getHandle() {
+         return mHandle;
+     }
+ 
+diff --git a/core/java/android/hardware/SystemSensorManager.java b/core/java/android/hardware/SystemSensorManager.java
+index 0204e94..43c4d53 100644
+--- a/core/java/android/hardware/SystemSensorManager.java
++++ b/core/java/android/hardware/SystemSensorManager.java
+@@ -32,36 +32,45 @@ import java.util.List;
+  * Sensor manager implementation that communicates with the built-in
+  * system sensors.
+  *
+- * @hide
++ * removed hide
+  */
+ public class SystemSensorManager extends SensorManager {
+     private static final int SENSOR_DISABLE = -1;
+-    private static boolean sSensorModuleInitialized = false;
+-    private static ArrayList<Sensor> sFullSensorsList = new ArrayList<Sensor>();
++    private boolean sSensorModuleInitialized = false;
++    private ArrayList<Sensor> sFullSensorsList = new ArrayList<Sensor>();
+     /* The thread and the sensor list are global to the process
+      * but the actual thread is spawned on demand */
+-    private static SensorThread sSensorThread;
+-    private static int sQueue;
++    private SensorThread sSensorThread;
++    private int sQueue;
+ 
+     // Used within this module from outside SensorManager, don't make private
+-    static SparseArray<Sensor> sHandleToSensor = new SparseArray<Sensor>();
+-    static final ArrayList<ListenerDelegate> sListeners =
++    SparseArray<Sensor> sHandleToSensor = new SparseArray<Sensor>();
++    final ArrayList<ListenerDelegate> sListeners =
+         new ArrayList<ListenerDelegate>();
+ 
+     // Common pool of sensor events.
+-    static SensorEventPool sPool;
++    SensorEventPool sPool;
+ 
+     // Looper associated with the context in which this instance was created.
+     final Looper mMainLooper;
+ 
++    int mSensorManager;
++
++    public static int getServerHandle() {
++        return sensors_get_sensorservice_binder();
++    }
++
+     /*-----------------------------------------------------------------------*/
+ 
+-    static private class SensorThread {
++    private class SensorThread {
+ 
+         Thread mThread;
+         boolean mSensorsReady;
++        final int mSensorManager;
++
++        SensorThread(int sensorManagerHandle) {
++            mSensorManager = sensorManagerHandle;
+ 
+-        SensorThread() {
+         }
+ 
+         @Override
+@@ -96,7 +105,7 @@ public class SystemSensorManager extends SensorManager {
+                 // NOTE: this cannot synchronize on sListeners, since
+                 // it's held in the main thread at least until we
+                 // return from here.
+-                sQueue = sensors_create_queue();
++                sQueue = sensors_create_queue(mSensorManager);
+                 return true;
+             }
+ 
+@@ -248,22 +257,23 @@ public class SystemSensorManager extends SensorManager {
+     /**
+      * {@hide}
+      */
+-    public SystemSensorManager(Looper mainLooper) {
++    public SystemSensorManager(int sensorServerHandle, Looper mainLooper) {
+         mMainLooper = mainLooper;
++        mSensorManager = 0;
+ 
+         synchronized(sListeners) {
+             if (!sSensorModuleInitialized) {
+-                sSensorModuleInitialized = true;
++                Log.d(TAG, "Initializing SystemSensorManager");
+ 
+                 nativeClassInit();
+ 
+                 // initialize the sensor list
+-                sensors_module_init();
++                mSensorManager = sensors_module_init(sensorServerHandle);
+                 final ArrayList<Sensor> fullList = sFullSensorsList;
+                 int i = 0;
+                 do {
+                     Sensor sensor = new Sensor();
+-                    i = sensors_module_get_next_sensor(sensor, i);
++                    i = sensors_module_get_next_sensor(mSensorManager, sensor, i);
+ 
+                     if (i>=0) {
+                         //Log.d(TAG, "found sensor: " + sensor.getName() +
+@@ -274,7 +284,7 @@ public class SystemSensorManager extends SensorManager {
+                 } while (i>0);
+ 
+                 sPool = new SensorEventPool( sFullSensorsList.size()*2 );
+-                sSensorThread = new SensorThread();
++                sSensorThread = new SensorThread(mSensorManager);
+             }
+         }
+     }
+@@ -385,14 +395,26 @@ public class SystemSensorManager extends SensorManager {
+         }
+     }
+ 
++    public int pushSensorEvent(int sensor, float[] values, int status, long timestamp) {
++      int channel = sensors_create_input(mSensorManager);
++      int numPushed = sensors_data_push(channel, sensor, values, status, timestamp);
++      sensors_destroy_input(channel);
++      return numPushed;
++    }
++
+     private static native void nativeClassInit();
+ 
+-    private static native int sensors_module_init();
+-    private static native int sensors_module_get_next_sensor(Sensor sensor, int next);
++    private static native int sensors_get_sensorservice_binder();
++    private static native int sensors_module_init(int sensorServerHandle);
++    private static native int sensors_module_get_next_sensor(int sensorManagerHandle, Sensor sensor, int next);
+ 
+     // Used within this module from outside SensorManager, don't make private
+-    static native int sensors_create_queue();
++    static native int sensors_create_queue(int sensorManagerHandle);
+     static native void sensors_destroy_queue(int queue);
+     static native boolean sensors_enable_sensor(int queue, String name, int sensor, int enable);
+     static native int sensors_data_poll(int queue, float[] values, int[] status, long[] timestamp);
++
++    static native int sensors_create_input(int sensorManagerHandle);
++    static native void sensors_destroy_input(int channel);
++    static native int sensors_data_push(int channel, int sensor, float[] values, int status, long timestamp);
+ }
+diff --git a/core/java/android/os/Parcel.java b/core/java/android/os/Parcel.java
+index 788ab74..9ff0614 100644
+--- a/core/java/android/os/Parcel.java
++++ b/core/java/android/os/Parcel.java
+@@ -229,6 +229,11 @@ public final class Parcel {
+     private static final int EX_ILLEGAL_STATE = -5;
+     private static final int EX_HAS_REPLY_HEADER = -128;  // special; see below
+ 
++    private static native int nativeObjectsCount(int nativePtr);
++    private static native IBinder nativeReadObject(int nativePtr, int index);
++    private static native void nativeWriteObject(int nativePtr, int index, IBinder object);
++    private static native int[] nativeGetObjectPositions(int nativePtr);
++
+     private static native int nativeDataSize(int nativePtr);
+     private static native int nativeDataAvail(int nativePtr);
+     private static native int nativeDataPosition(int nativePtr);
+@@ -328,6 +333,22 @@ public final class Parcel {
+         }
+     }
+ 
++    public final int objectsCount() {
++        return nativeObjectsCount(mNativePtr);
++    }
++
++    public final IBinder readObject(int index) {
++        return nativeReadObject(mNativePtr, index);
++    }
++
++    public final void writeObject(int index, IBinder object) {
++        nativeWriteObject(mNativePtr, index, object);
++    }
++
++    public final int[] getObjectPositions() {
++        return nativeGetObjectPositions(mNativePtr);
++    }
++
+     /**
+      * Returns the total amount of data contained in the parcel.
+      */
+diff --git a/core/java/com/android/internal/os/BinderInternal.java b/core/java/com/android/internal/os/BinderInternal.java
+index f54a3e9..3d18414 100644
+--- a/core/java/com/android/internal/os/BinderInternal.java
++++ b/core/java/com/android/internal/os/BinderInternal.java
+@@ -92,4 +92,7 @@ public class BinderInternal {
+     static void forceBinderGc() {
+         forceGc("Binder");
+     }
++
++    public static final native IBinder binderForNativeHandle(int handle);
++    public static final native int nativeHandleForBinder(IBinder binder);
+ }
+diff --git a/core/jni/android_hardware_SensorManager.cpp b/core/jni/android_hardware_SensorManager.cpp
+index 3c1b9c8..bb987e9 100644
+--- a/core/jni/android_hardware_SensorManager.cpp
++++ b/core/jni/android_hardware_SensorManager.cpp
+@@ -18,10 +18,12 @@
+ 
+ #include "utils/Log.h"
+ 
++#include <gui/ISensorServer.h>
+ #include <gui/Sensor.h>
+ #include <gui/SensorManager.h>
+ #include <gui/SensorEventQueue.h>
+ 
++
+ #include "jni.h"
+ #include "JNIHelp.h"
+ 
+@@ -45,18 +47,40 @@ struct SensorOffsets
+  * The method below are not thread-safe and not intended to be
+  */
+ 
++static jint
++sensors_get_sensorservice_binder(JNIEnv *env, jclass clazz)
++{
++    ALOGD("sensors_get_sensorservice_binder");
++    sp<IBinder> binder = SensorManager::getServerHandle()->asBinder();
++    if (binder != 0) {
++        binder->incStrong((void*)sensors_get_sensorservice_binder);
++    }
++    int binderHandle = reinterpret_cast<int>(binder.get());
++    ALOGD("sensors_get_sensorservice_binder return binderHandle=%d", binderHandle);
++    return binderHandle;
++}
+ 
+ static jint
+-sensors_module_init(JNIEnv *env, jclass clazz)
++sensors_module_init(JNIEnv *env, jclass clazz, jint binderHandle)
+ {
+-    SensorManager::getInstance();
+-    return 0;
++    ALOGD("sensors_module_init called with binderHandle=%d", binderHandle);
++    sp<IBinder> binder(reinterpret_cast<IBinder*>(binderHandle));
++    sp<ISensorServer> server(interface_cast<ISensorServer>(binder));
++    sp<SensorManager> sensorManager(new SensorManager(server));
++    if (sensorManager != 0) {
++        sensorManager->incStrong((void*)sensors_module_init);
++    }
++    int managerHandle = reinterpret_cast<int>(sensorManager.get());
++    ALOGD("sensors_module_init return managerHandle=%d", managerHandle);
++    return managerHandle;
+ }
+ 
+ static jint
+-sensors_module_get_next_sensor(JNIEnv *env, jobject clazz, jobject sensor, jint next)
++sensors_module_get_next_sensor(JNIEnv *env, jobject clazz, jint mgrHandle, jobject sensor, jint next)
+ {
+-    SensorManager& mgr(SensorManager::getInstance());
++    ALOGD("sensors_module_get_next_sensor. mgrHandle=%d", mgrHandle);
++    sp<SensorManager> spmgr(reinterpret_cast<SensorManager*>(mgrHandle));
++    SensorManager& mgr(*spmgr.get());
+ 
+     Sensor const* const* sensorList;
+     size_t count = mgr.getSensorList(&sensorList);
+@@ -83,23 +107,51 @@ sensors_module_get_next_sensor(JNIEnv *env, jobject clazz, jobject sensor, jint
+ 
+ //----------------------------------------------------------------------------
+ static jint
+-sensors_create_queue(JNIEnv *env, jclass clazz)
++sensors_create_queue(JNIEnv *env, jclass clazz, jint mgrHandle)
+ {
+-    SensorManager& mgr(SensorManager::getInstance());
++    ALOGD("sensors_create_queue. mgrHandle=%d", mgrHandle);
++    sp<SensorManager> spmgr(reinterpret_cast<SensorManager*>(mgrHandle));
++    SensorManager& mgr(*spmgr.get());
+     sp<SensorEventQueue> queue(mgr.createEventQueue());
+     queue->incStrong(clazz);
+-    return reinterpret_cast<int>(queue.get());
++    int nativeQueue = reinterpret_cast<int>(queue.get());
++    ALOGD("sensors_create_queue. return nativeQueue=%d", nativeQueue);
++    return nativeQueue;
++}
++
++static jint
++sensors_create_input(JNIEnv *env, jclass clazz, jint mgrHandle)
++{
++    ALOGD("sensors_create_input. mgrHandle=%d", mgrHandle);
++    sp<SensorManager> spmgr(reinterpret_cast<SensorManager*>(mgrHandle));
++    SensorManager& mgr(*spmgr.get());
++    sp<BitTube> channel(mgr.getInputChannel());
++    ALOGD("sensors_create_input, channel=%d", channel.get());
++    channel->incStrong(clazz);
++    ALOGD("sensors_create_input after incStrong");
++    return reinterpret_cast<int>(channel.get());
+ }
+ 
+ static void
+ sensors_destroy_queue(JNIEnv *env, jclass clazz, jint nativeQueue)
+ {
++    ALOGD("sensors_destroy_queue. nativeQueue=%d", nativeQueue);
+     sp<SensorEventQueue> queue(reinterpret_cast<SensorEventQueue *>(nativeQueue));
+     if (queue != 0) {
+         queue->decStrong(clazz);
+     }
+ }
+ 
++static void
++sensors_destroy_input(JNIEnv *env, jclass clazz, jint inputChannel)
++{
++    ALOGD("sensors_destroy_input. inputChannel=%d", inputChannel);
++    sp<BitTube> channel(reinterpret_cast<BitTube *>(inputChannel));
++    if (channel != 0) {
++        channel->decStrong(clazz);
++    }
++}
++
+ static jboolean
+ sensors_enable_sensor(JNIEnv *env, jclass clazz,
+         jint nativeQueue, jstring name, jint sensor, jint delay)
+@@ -119,6 +171,7 @@ static jint
+ sensors_data_poll(JNIEnv *env, jclass clazz, jint nativeQueue,
+         jfloatArray values, jintArray status, jlongArray timestamp)
+ {
++    //ALOGD("sensors_data_poll. nativeQueue=%d", nativeQueue);
+     sp<SensorEventQueue> queue(reinterpret_cast<SensorEventQueue *>(nativeQueue));
+     if (queue == 0) return -1;
+ 
+@@ -146,9 +199,41 @@ sensors_data_poll(JNIEnv *env, jclass clazz, jint nativeQueue,
+     return event.sensor;
+ }
+ 
++static ssize_t
++sensors_data_push (JNIEnv *env, jclass _this, jint inputChannel,
++        jint sensor, jfloatArray values, jint status, jlong timestamp)
++{
++    sp<BitTube> channel(reinterpret_cast<BitTube *>(inputChannel));
++    if (channel == NULL) {
++        ALOGE("sensors_data_push got null channel");
++        return EINVAL;
++    }
++
++    ASensorEvent event;
++    env->GetFloatArrayRegion(values, 0, 3, event.vector.v);
++    event.vector.status = status;
++    event.timestamp = timestamp;
++    event.sensor = sensor;
++
++    /*
++    event.sensor = SENSOR_TYPE_ACCELEROMETER;
++    event.type = SENSOR_TYPE_ACCELEROMETER;
++    event.acceleration.x = -1.3;
++    event.acceleration.y = 1.8;
++    event.acceleration.z = -0.7;
++    struct timespec now;
++    clock_gettime(CLOCK_MONOTONIC, &now);
++    event.timestamp = (int64_t) now.tv_sec*1000000000LL + now.tv_nsec;
++    */
++
++    status_t res;
++    return BitTube::sendObjects(channel, &event, 1);
++}
++
+ static void
+ nativeClassInit (JNIEnv *_env, jclass _this)
+ {
++    ALOGD("nativeClassInit");
+     jclass sensorClass = _env->FindClass("android/hardware/Sensor");
+     SensorOffsets& sensorOffsets = gSensorOffsets;
+     sensorOffsets.name        = _env->GetFieldID(sensorClass, "mName",      "Ljava/lang/String;");
+@@ -164,16 +249,20 @@ nativeClassInit (JNIEnv *_env, jclass _this)
+ 
+ static JNINativeMethod gMethods[] = {
+     {"nativeClassInit", "()V",              (void*)nativeClassInit },
+-    {"sensors_module_init","()I",           (void*)sensors_module_init },
+-    {"sensors_module_get_next_sensor","(Landroid/hardware/Sensor;I)I",
++    {"sensors_get_sensorservice_binder",  "()I",     (void*)sensors_get_sensorservice_binder },
++    {"sensors_module_init","(I)I",           (void*)sensors_module_init },
++    {"sensors_module_get_next_sensor","(ILandroid/hardware/Sensor;I)I",
+                                             (void*)sensors_module_get_next_sensor },
+ 
+-    {"sensors_create_queue",  "()I",        (void*)sensors_create_queue },
++    {"sensors_create_queue",  "(I)I",        (void*)sensors_create_queue },
++    {"sensors_create_input",  "(I)I",        (void*)sensors_create_input },
+     {"sensors_destroy_queue", "(I)V",       (void*)sensors_destroy_queue },
++    {"sensors_destroy_input", "(I)V",       (void*)sensors_destroy_input },
+     {"sensors_enable_sensor", "(ILjava/lang/String;II)Z",
+                                             (void*)sensors_enable_sensor },
+ 
+-    {"sensors_data_poll",  "(I[F[I[J)I",     (void*)sensors_data_poll },
++    {"sensors_data_poll",  "(I[F[I[J)I",    (void*)sensors_data_poll },
++    {"sensors_data_push",  "(II[FIJ)I",     (void*)sensors_data_push },
+ };
+ 
+ }; // namespace android
+diff --git a/core/jni/android_os_Parcel.cpp b/core/jni/android_os_Parcel.cpp
+index 858ec79..4c723d0 100644
+--- a/core/jni/android_os_Parcel.cpp
++++ b/core/jni/android_os_Parcel.cpp
+@@ -89,6 +89,41 @@ void recycleJavaParcelObject(JNIEnv* env, jobject parcelObj)
+     env->CallVoidMethod(parcelObj, gParcelOffsets.recycle);
+ }
+ 
++static jint android_os_Parcel_objectsCount(JNIEnv* env, jclass clazz, jint nativePtr)
++{
++    Parcel* parcel = reinterpret_cast<Parcel*>(nativePtr);
++    return parcel ? parcel->objectsCount() : 0;
++}
++
++static jobject android_os_Parcel_readObject(JNIEnv* env, jclass clazz, jint nativePtr, jint index)
++{
++    Parcel* parcel = reinterpret_cast<Parcel*>(nativePtr);
++    if (parcel != NULL && 0 <= index && index < parcel->objectsCount()) {
++        size_t pos = parcel->objects()[index];
++        size_t oldpos = parcel->dataPosition();
++        parcel->setDataPosition(pos);
++        jobject object = javaObjectForIBinder(env, parcel->readStrongBinder());
++        parcel->setDataPosition(oldpos);
++        return object;
++    }
++    return NULL;
++}
++
++static void android_os_Parcel_writeObject(JNIEnv* env, jclass clazz, jint nativePtr, jint index, jobject object)
++{
++    Parcel* parcel = reinterpret_cast<Parcel*>(nativePtr);
++    if (parcel != NULL && 0 <= index && index < parcel->objectsCount()) {
++        size_t pos = parcel->objects()[index];
++        size_t oldpos = parcel->dataPosition();
++        parcel->setDataPosition(pos);
++        const status_t err = parcel->writeStrongBinder(ibinderForJavaObject(env, object));
++        parcel->setDataPosition(oldpos);
++        if (err != NO_ERROR) {
++            signalExceptionForError(env, clazz, err);
++        }
++    }
++}
++
+ static jint android_os_Parcel_dataSize(JNIEnv* env, jclass clazz, jint nativePtr)
+ {
+     Parcel* parcel = reinterpret_cast<Parcel*>(nativePtr);
+@@ -489,6 +524,27 @@ static void android_os_Parcel_destroy(JNIEnv* env, jclass clazz, jint nativePtr)
+     delete parcel;
+ }
+ 
++static jintArray android_os_Parcel_getObjectPositionsArray(JNIEnv* env, jclass clazz, jint nativePtr)
++{
++    Parcel* parcel = reinterpret_cast<Parcel*>(nativePtr);
++    if (parcel == NULL) {
++       return NULL;
++    }
++    jintArray ret = env->NewIntArray(parcel->objectsCount());
++
++    if (ret != NULL)
++    {
++        jint* array = (jint*)env->GetPrimitiveArrayCritical(ret, 0);
++        if (array != NULL)
++        {
++            memcpy(array, parcel->objects(), parcel->objectsCount() * sizeof(size_t));
++            env->ReleasePrimitiveArrayCritical(ret, array, 0);
++        }
++    }
++
++    return ret;
++}
++
+ static jbyteArray android_os_Parcel_marshall(JNIEnv* env, jclass clazz, jint nativePtr)
+ {
+     Parcel* parcel = reinterpret_cast<Parcel*>(nativePtr);
+@@ -499,8 +555,10 @@ static jbyteArray android_os_Parcel_marshall(JNIEnv* env, jclass clazz, jint nat
+     // do not marshall if there are binder objects in the parcel
+     if (parcel->objectsCount())
+     {
+-        jniThrowException(env, "java/lang/RuntimeException", "Tried to marshall a Parcel that contained Binder objects.");
+-        return NULL;
++        //jniThrowException(env, "java/lang/RuntimeException", "Tried to marshall a Parcel that contained Binder objects.");
++        //return NULL;
++
++        ALOGD(LOG_TAG, "About to marshall a Parcel that contained Binder objects.");
+     }
+ 
+     jbyteArray ret = env->NewByteArray(parcel->dataSize());
+@@ -623,6 +681,11 @@ static void android_os_Parcel_enforceInterface(JNIEnv* env, jclass clazz, jint n
+ // ----------------------------------------------------------------------------
+ 
+ static const JNINativeMethod gParcelMethods[] = {
++    {"nativeObjectsCount",        "(I)I", (void*)android_os_Parcel_objectsCount},
++    {"nativeReadObject",          "(II)Landroid/os/IBinder;", (void*)android_os_Parcel_readObject},
++    {"nativeWriteObject",         "(IILandroid/os/IBinder;)V", (void*)android_os_Parcel_writeObject},
++    {"nativeGetObjectPositions",  "(I)[I", (void*)android_os_Parcel_getObjectPositionsArray},
++
+     {"nativeDataSize",            "(I)I", (void*)android_os_Parcel_dataSize},
+     {"nativeDataAvail",           "(I)I", (void*)android_os_Parcel_dataAvail},
+     {"nativeDataPosition",        "(I)I", (void*)android_os_Parcel_dataPosition},
+diff --git a/core/jni/android_util_Binder.cpp b/core/jni/android_util_Binder.cpp
+index 881d9a0..93d5cae 100644
+--- a/core/jni/android_util_Binder.cpp
++++ b/core/jni/android_util_Binder.cpp
+@@ -883,6 +883,19 @@ static void android_os_BinderInternal_handleGc(JNIEnv* env, jobject clazz)
+     android_atomic_and(0, &gNumRefsCreated);
+ }
+ 
++static jint android_os_BinderInternal_nativeHandleForBinder(
++        JNIEnv* env, jobject clazz, jobject javaBinder) {
++    sp<IBinder> nativeBinder = ibinderForJavaObject(env, javaBinder);
++    nativeBinder->incStrong((void*)android_os_BinderInternal_nativeHandleForBinder);
++    return reinterpret_cast<int>(nativeBinder.get());
++}
++
++static jobject android_os_BinderInternal_binderForNativeHandle(
++        JNIEnv *env, jobject clazz, jint nativeHandle) {
++    sp<IBinder> nativeBinder(reinterpret_cast<IBinder*>(nativeHandle));
++    return javaObjectForIBinder(env, nativeBinder);
++}
++
+ // ----------------------------------------------------------------------------
+ 
+ static const JNINativeMethod gBinderInternalMethods[] = {
+@@ -890,7 +903,10 @@ static const JNINativeMethod gBinderInternalMethods[] = {
+     { "getContextObject", "()Landroid/os/IBinder;", (void*)android_os_BinderInternal_getContextObject },
+     { "joinThreadPool", "()V", (void*)android_os_BinderInternal_joinThreadPool },
+     { "disableBackgroundScheduling", "(Z)V", (void*)android_os_BinderInternal_disableBackgroundScheduling },
+-    { "handleGc", "()V", (void*)android_os_BinderInternal_handleGc }
++    { "handleGc", "()V", (void*)android_os_BinderInternal_handleGc },
++
++    { "nativeHandleForBinder", "(Landroid/os/IBinder;)I", (void*)android_os_BinderInternal_nativeHandleForBinder},
++    { "binderForNativeHandle", "(I)Landroid/os/IBinder;", (void*)android_os_BinderInternal_binderForNativeHandle}
+ };
+ 
+ const char* const kBinderInternalPathName = "com/android/internal/os/BinderInternal";
+diff --git a/native/android/sensor.cpp b/native/android/sensor.cpp
+index 76c6eda..5ff35b7 100644
+--- a/native/android/sensor.cpp
++++ b/native/android/sensor.cpp
+@@ -24,12 +24,14 @@
+ #include <utils/Looper.h>
+ #include <utils/Timers.h>
+ 
++#include <gui/ISensorServer.h>
+ #include <gui/Sensor.h>
+ #include <gui/SensorManager.h>
+ #include <gui/SensorEventQueue.h>
+ 
+ #include <poll.h>
+ 
++using android::ISensorServer;
+ using android::sp;
+ using android::Sensor;
+ using android::SensorManager;
+@@ -40,7 +42,7 @@ using android::String8;
+ 
+ ASensorManager* ASensorManager_getInstance()
+ {
+-    return &SensorManager::getInstance();
++    return new SensorManager(SensorManager::getServerHandle());
+ }
+ 
+ int ASensorManager_getSensorList(ASensorManager* manager,
+diff --git a/services/java/com/android/server/power/PowerManagerService.java b/services/java/com/android/server/power/PowerManagerService.java
+index 546f22e..0849c41 100644
+--- a/services/java/com/android/server/power/PowerManagerService.java
++++ b/services/java/com/android/server/power/PowerManagerService.java
+@@ -421,7 +421,8 @@ public final class PowerManagerService extends IPowerManager.Stub
+             mScreenBrightnessSettingMaximum = pm.getMaximumScreenBrightnessSetting();
+             mScreenBrightnessSettingDefault = pm.getDefaultScreenBrightnessSetting();
+ 
+-            SensorManager sensorManager = new SystemSensorManager(mHandler.getLooper());
++            SensorManager sensorManager = new SystemSensorManager(
++                SystemSensorManager.getServerHandle(), mHandler.getLooper());
+ 
+             // The notifier runs on the system server's main looper so as not to interfere
+             // with the animations and other critical functions of the power manager.

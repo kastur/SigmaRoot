@@ -1,0 +1,14 @@
+Sigma requires a slight modification to the Android Runtime.
+
+We have modified the Android 4.2.2_r1 version source tree to support expose
+some features of Binder, Parcel, and SensorManager. The modified runtime can
+be compiled and flashed on a real device or run on the emulator by following
+the directions at https://source.android.com/. The following patches have to
+be applied to 2 modified sub-projects.
+
+The modified source tree for 2 sub-projects is available online:
+https://github.com/6b72/platform_frameworks_base/tree/sigma
+https://github.com/6b72/platform_frameworks_native/tree/sigma
+
+
+TODO: Add a link to the modified, pre-compiled emulator image.

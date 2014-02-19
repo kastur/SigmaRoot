@@ -1,0 +1,722 @@
+diff --git a/cmds/sensorservice/main_sensorservice.cpp b/cmds/sensorservice/main_sensorservice.cpp
+index 8610627..80fec27 100644
+--- a/cmds/sensorservice/main_sensorservice.cpp
++++ b/cmds/sensorservice/main_sensorservice.cpp
+@@ -20,6 +20,7 @@
+ using namespace android;
+ 
+ int main(int argc, char** argv) {
++    ALOGD("Patched sensor service.");
+     SensorService::publishAndJoinThreadPool();
+     return 0;
+ }
+diff --git a/include/gui/BitTube.h b/include/gui/BitTube.h
+index 3022d05..12b5f46 100644
+--- a/include/gui/BitTube.h
++++ b/include/gui/BitTube.h
+@@ -57,7 +57,7 @@ public:
+     }
+ 
+ private:
+-    int mSendFd;
++    mutable int mSendFd;
+     mutable int mReceiveFd;
+ 
+     static ssize_t sendObjects(const sp<BitTube>& tube,
+diff --git a/include/gui/ISensorServer.h b/include/gui/ISensorServer.h
+index 9c8afc5..bfca1d9 100644
+--- a/include/gui/ISensorServer.h
++++ b/include/gui/ISensorServer.h
+@@ -28,6 +28,7 @@
+ namespace android {
+ // ----------------------------------------------------------------------------
+ 
++class BitTube;
+ class Sensor;
+ class ISensorEventConnection;
+ 
+@@ -38,6 +39,7 @@ public:
+ 
+     virtual Vector<Sensor> getSensorList() = 0;
+     virtual sp<ISensorEventConnection> createSensorEventConnection() = 0;
++    virtual sp<BitTube> getInputChannel() = 0;
+ };
+ 
+ // ----------------------------------------------------------------------------
+diff --git a/include/gui/SensorEventQueue.h b/include/gui/SensorEventQueue.h
+index 759b5cb..7cfe17b 100644
+--- a/include/gui/SensorEventQueue.h
++++ b/include/gui/SensorEventQueue.h
+@@ -21,6 +21,7 @@
+ #include <sys/types.h>
+ 
+ #include <utils/Errors.h>
++#include <utils/Mutex.h>
+ #include <utils/RefBase.h>
+ #include <utils/Timers.h>
+ 
+diff --git a/include/gui/SensorManager.h b/include/gui/SensorManager.h
+index 3176462..5009b14 100644
+--- a/include/gui/SensorManager.h
++++ b/include/gui/SensorManager.h
+@@ -25,6 +25,7 @@
+ #include <utils/Errors.h>
+ #include <utils/RefBase.h>
+ #include <utils/Singleton.h>
++#include <utils/Mutex.h>
+ #include <utils/Vector.h>
+ 
+ #include <gui/SensorEventQueue.h>
+@@ -44,16 +45,19 @@ class SensorEventQueue;
+ // ----------------------------------------------------------------------------
+ 
+ class SensorManager :
+-    public ASensorManager,
+-    public Singleton<SensorManager>
++    public ASensorManager
++    , public Singleton<SensorManager>
++    , public RefBase
+ {
+ public:
++    static sp<ISensorServer> getServerHandle();
+     SensorManager();
++    SensorManager(const sp<ISensorServer>& serverHandle);
+     ~SensorManager();
+-
+     ssize_t getSensorList(Sensor const* const** list) const;
+     Sensor const* getDefaultSensor(int type);
+     sp<SensorEventQueue> createEventQueue();
++    sp<BitTube> getInputChannel();
+ 
+ private:
+     // DeathRecipient interface
+diff --git a/libs/gui/BitTube.cpp b/libs/gui/BitTube.cpp
+index cf44bb9..955f407 100644
+--- a/libs/gui/BitTube.cpp
++++ b/libs/gui/BitTube.cpp
+@@ -34,7 +34,6 @@ namespace android {
+ // we really need.  So we make it smaller.
+ static const size_t SOCKET_BUFFER_SIZE = 4 * 1024;
+ 
+-
+ BitTube::BitTube()
+     : mSendFd(-1), mReceiveFd(-1)
+ {
+@@ -49,6 +48,7 @@ BitTube::BitTube()
+         fcntl(sockets[1], F_SETFL, O_NONBLOCK);
+         mReceiveFd = sockets[0];
+         mSendFd = sockets[1];
++        ALOGD("BitTube::BitTube constructed with receiveFd=%d and sendFd=%d", mReceiveFd, mSendFd);
+     } else {
+         mReceiveFd = -errno;
+         ALOGE("BitTube: pipe creation failed (%s)", strerror(-mReceiveFd));
+@@ -58,7 +58,10 @@ BitTube::BitTube()
+ BitTube::BitTube(const Parcel& data)
+     : mSendFd(-1), mReceiveFd(-1)
+ {
+-    mReceiveFd = dup(data.readFileDescriptor());
++    ALOGD("BitTube::BitTube with parcel data");
++    int origReceiveFd = data.readFileDescriptor();
++    mReceiveFd = dup(origReceiveFd);
++    ALOGD("BitTube::BitTube receiveFd orig=%d, duped=%d", origReceiveFd, mReceiveFd);
+     if (mReceiveFd >= 0) {
+         int size = SOCKET_BUFFER_SIZE;
+         setsockopt(mReceiveFd, SOL_SOCKET, SO_SNDBUF, &size, sizeof(size));
+@@ -66,9 +69,23 @@ BitTube::BitTube(const Parcel& data)
+         fcntl(mReceiveFd, F_SETFL, O_NONBLOCK);
+     } else {
+         mReceiveFd = -errno;
+-        ALOGE("BitTube(Parcel): can't dup filedescriptor (%s)",
++        ALOGE("BitTube(Parcel): can't dup receive filedescriptor (%s)",
+                 strerror(-mReceiveFd));
+     }
++
++    int origSendFd = data.readFileDescriptor();
++    mSendFd = dup(origSendFd);
++    ALOGD("BitTube::BitTube sendFd orig=%d, duped=%d", origSendFd, mSendFd);
++    if (mSendFd >= 0) {
++        int size = SOCKET_BUFFER_SIZE;
++        setsockopt(mSendFd, SOL_SOCKET, SO_SNDBUF, &size, sizeof(size));
++        setsockopt(mSendFd, SOL_SOCKET, SO_RCVBUF, &size, sizeof(size));
++        fcntl(mSendFd, F_SETFL, O_NONBLOCK);
++    } else {
++        mSendFd = -errno;
++        ALOGE("BitTube(Parcel): can't dup send filedescriptor (%s)",
++                strerror(-mSendFd));
++    }
+ }
+ 
+ BitTube::~BitTube()
+@@ -121,12 +138,21 @@ ssize_t BitTube::read(void* vaddr, size_t size)
+ 
+ status_t BitTube::writeToParcel(Parcel* reply) const
+ {
+-    if (mReceiveFd < 0)
++    ALOGD("BitTube::writeToParcel");
++    if (mReceiveFd < 0 || mSendFd < 0) {
++        ALOGE("BitTube::writeToParcel mReceiveFd < 0 || mSendFd < 0");
+         return -EINVAL;
++    }
++
++    status_t result;
++    ALOGD("BitTube::writeToParcel writing mReceiveFd=%d", mReceiveFd);
++    result = reply->writeDupFileDescriptor(mReceiveFd);
++    ALOGD("BitTube::writeToParcel writing mSendFd=%d", mSendFd);
++    result = reply->writeDupFileDescriptor(mSendFd);
+ 
+-    status_t result = reply->writeDupFileDescriptor(mReceiveFd);
+-    close(mReceiveFd);
+-    mReceiveFd = -1;
++    // Don't close anything.
++    //close(mReceiveFd);
++    //mReceiveFd = -1;
+     return result;
+ }
+ 
+@@ -134,6 +160,7 @@ status_t BitTube::writeToParcel(Parcel* reply) const
+ ssize_t BitTube::sendObjects(const sp<BitTube>& tube,
+         void const* events, size_t count, size_t objSize)
+ {
++    //ALOGD("BitTube::sendObjects");
+     ssize_t numObjects = 0;
+     for (size_t i=0 ; i<count ; i++) {
+         const char* vaddr = reinterpret_cast<const char*>(events) + objSize * i;
+@@ -153,6 +180,7 @@ ssize_t BitTube::sendObjects(const sp<BitTube>& tube,
+ ssize_t BitTube::recvObjects(const sp<BitTube>& tube,
+         void* events, size_t count, size_t objSize)
+ {
++    //ALOGD("BitTube::recvObjects");
+     ssize_t numObjects = 0;
+     for (size_t i=0 ; i<count ; i++) {
+         char* vaddr = reinterpret_cast<char*>(events) + objSize * i;
+diff --git a/libs/gui/ISensorServer.cpp b/libs/gui/ISensorServer.cpp
+index 0b76f37..9fd3fa4 100644
+--- a/libs/gui/ISensorServer.cpp
++++ b/libs/gui/ISensorServer.cpp
+@@ -25,6 +25,7 @@
+ #include <binder/Parcel.h>
+ #include <binder/IInterface.h>
+ 
++#include <gui/BitTube.h>
+ #include <gui/Sensor.h>
+ #include <gui/ISensorServer.h>
+ #include <gui/ISensorEventConnection.h>
+@@ -35,6 +36,7 @@ namespace android {
+ enum {
+     GET_SENSOR_LIST = IBinder::FIRST_CALL_TRANSACTION,
+     CREATE_SENSOR_EVENT_CONNECTION,
++    GET_INPUT_CHANNEL,
+ };
+ 
+ class BpSensorServer : public BpInterface<ISensorServer>
+@@ -68,6 +70,17 @@ public:
+         remote()->transact(CREATE_SENSOR_EVENT_CONNECTION, data, &reply);
+         return interface_cast<ISensorEventConnection>(reply.readStrongBinder());
+     }
++
++    virtual sp<BitTube> getInputChannel()
++    {
++        ALOGD("BpSensorServer::getInputChannel");
++        Parcel data, reply;
++        data.writeInterfaceToken(ISensorServer::getInterfaceDescriptor());
++        remote()->transact(GET_INPUT_CHANNEL, data, &reply);
++        sp<BitTube> channel(new BitTube(reply));
++        ALOGD("BpSensorServer::getInputChannel after remote transact, local channel=%d", channel.get());
++        return channel.get();
++    }
+ };
+ 
+ IMPLEMENT_META_INTERFACE(SensorServer, "android.gui.SensorServer");
+@@ -94,6 +107,15 @@ status_t BnSensorServer::onTransact(
+             reply->writeStrongBinder(connection->asBinder());
+             return NO_ERROR;
+         } break;
++        case GET_INPUT_CHANNEL: {
++            ALOGD("BnSensorServer::onTransact called");
++            CHECK_INTERFACE(ISensorServer, data, reply);
++            sp<BitTube> channel(getInputChannel());
++            ALOGD("BnSensorServer::onTransact channel: %d", channel.get());
++            channel->writeToParcel(reply);
++            ALOGD("BnSensorServer::onTransact done");
++            return NO_ERROR;
++        } break;
+     }
+     return BBinder::onTransact(code, data, reply, flags);
+ }
+diff --git a/libs/gui/SensorManager.cpp b/libs/gui/SensorManager.cpp
+index b80da56..a794987 100644
+--- a/libs/gui/SensorManager.cpp
++++ b/libs/gui/SensorManager.cpp
+@@ -38,11 +38,55 @@ namespace android {
+ 
+ ANDROID_SINGLETON_STATIC_INSTANCE(SensorManager)
+ 
++
++sp<ISensorServer> SensorManager::getServerHandle() {
++    // try for one second
++    ALOGD("SensorManager::getServerHandle()");
++    sp<ISensorServer> serverHandle;
++    const String16 name("sensorservice");
++    for (int i=0 ; i<4 ; i++) {
++        status_t err = getService(name, &serverHandle);
++        if (err == NAME_NOT_FOUND) {
++            usleep(250000);
++            continue;
++        }
++        if (err != NO_ERROR) {
++            ALOGE("ERROR in SensorManager::getServerHandle()");
++        }
++        break;
++    }
++
++    ALOGD("SensorManager::getServerHandle() %d",
++        reinterpret_cast<int>(serverHandle.get()));
++    return serverHandle;
++}
++
+ SensorManager::SensorManager()
+-    : mSensorList(0)
++        : mSensorServer(getServerHandle()), mSensorList(0) {
++    ALOGD("SensorManager() with default getServerHandle()");
++    mSensors = mSensorServer->getSensorList();
++    size_t count = mSensors.size();
++    mSensorList = (Sensor const**)malloc(count * sizeof(Sensor*));
++    for (size_t i=0 ; i<count ; i++) {
++        mSensorList[i] = mSensors.array() + i;
++    }
++}
++
++SensorManager::SensorManager(const sp<ISensorServer>& serverHandle)
++    : mSensorServer(serverHandle), mSensorList(0)
+ {
++    ALOGD("SensorManager() with default provided serverHandle %d",
++        reinterpret_cast<int>(serverHandle.get()));
++
+     // okay we're not locked here, but it's not needed during construction
+-    assertStateLocked();
++    //assertStateLocked();
++
++    mSensors = mSensorServer->getSensorList();
++    size_t count = mSensors.size();
++    mSensorList = (Sensor const**)malloc(count * sizeof(Sensor*));
++    for (size_t i=0 ; i<count ; i++) {
++        mSensorList[i] = mSensors.array() + i;
++    }
+ }
+ 
+ SensorManager::~SensorManager()
+@@ -60,49 +104,40 @@ void SensorManager::sensorManagerDied()
+ }
+ 
+ status_t SensorManager::assertStateLocked() const {
++    return NO_ERROR;
++    /*
+     if (mSensorServer == NULL) {
+-        // try for one second
+-        const String16 name("sensorservice");
+-        for (int i=0 ; i<4 ; i++) {
+-            status_t err = getService(name, &mSensorServer);
+-            if (err == NAME_NOT_FOUND) {
+-                usleep(250000);
+-                continue;
+-            }
+-            if (err != NO_ERROR) {
+-                return err;
+-            }
+-            break;
+-        }
++        return NAME_NOT_FOUND)
++    }
+ 
+-        class DeathObserver : public IBinder::DeathRecipient {
+-            SensorManager& mSensorManger;
+-            virtual void binderDied(const wp<IBinder>& who) {
+-                ALOGW("sensorservice died [%p]", who.unsafe_get());
+-                mSensorManger.sensorManagerDied();
+-            }
+-        public:
+-            DeathObserver(SensorManager& mgr) : mSensorManger(mgr) { }
+-        };
+-
+-        mDeathObserver = new DeathObserver(*const_cast<SensorManager *>(this));
+-        mSensorServer->asBinder()->linkToDeath(mDeathObserver);
+-
+-        mSensors = mSensorServer->getSensorList();
+-        size_t count = mSensors.size();
+-        mSensorList = (Sensor const**)malloc(count * sizeof(Sensor*));
+-        for (size_t i=0 ; i<count ; i++) {
+-            mSensorList[i] = mSensors.array() + i;
++    /* DISABLE linkToDeath for now until its implemented by
++       the remote binder framework.
++    class DeathObserver : public IBinder::DeathRecipient {
++        SensorManager& mSensorManger;
++        virtual void binderDied(const wp<IBinder>& who) {
++            ALOGW("sensorservice died [%p]", who.unsafe_get());
++            mSensorManger.sensorManagerDied();
+         }
++    public:
++        DeathObserver(SensorManager& mgr) : mSensorManger(mgr) { }
++    };
++
++    mDeathObserver = new DeathObserver(*const_cast<SensorManager *>(this));
++    mSensorServer->asBinder()->linkToDeath(mDeathObserver);
++    */
++
++    /*
+     }
+ 
+     return NO_ERROR;
++    */
+ }
+ 
+ 
+ 
+ ssize_t SensorManager::getSensorList(Sensor const* const** list) const
+ {
++    ALOGD("SensorManager::getSensorList()");
+     Mutex::Autolock _l(mLock);
+     status_t err = assertStateLocked();
+     if (err < 0) {
+@@ -114,6 +149,7 @@ ssize_t SensorManager::getSensorList(Sensor const* const** list) const
+ 
+ Sensor const* SensorManager::getDefaultSensor(int type)
+ {
++    ALOGD("SensorManager::getDefaultSensor()");
+     Mutex::Autolock _l(mLock);
+     if (assertStateLocked() == NO_ERROR) {
+         // For now we just return the first sensor of that type we find.
+@@ -129,6 +165,7 @@ Sensor const* SensorManager::getDefaultSensor(int type)
+ 
+ sp<SensorEventQueue> SensorManager::createEventQueue()
+ {
++    ALOGD("SensorManager::createEventQueue()");
+     sp<SensorEventQueue> queue;
+ 
+     Mutex::Autolock _l(mLock);
+@@ -146,5 +183,24 @@ sp<SensorEventQueue> SensorManager::createEventQueue()
+     return queue;
+ }
+ 
++sp<BitTube> SensorManager::getInputChannel()
++{
++    ALOGD("SensorManager::getInputChannel()");
++    sp<BitTube> channel;
++
++    Mutex::Autolock _l(mLock);
++    while (assertStateLocked() == NO_ERROR) {
++        channel = mSensorServer->getInputChannel();
++        if (channel == NULL) {
++            // SensorService just died.
++            ALOGE("getInputChannel: channel is NULL. SensorService died.");
++            continue;
++        }
++        break;
++    }
++    ALOGD("SensorManager::getInputChannel(), channel=%d", channel.get());
++    return channel;
++}
++
+ // ----------------------------------------------------------------------------
+ }; // namespace android
+diff --git a/services/sensorservice/SensorService.cpp b/services/sensorservice/SensorService.cpp
+index e3dcd02..617e3e4 100644
+--- a/services/sensorservice/SensorService.cpp
++++ b/services/sensorservice/SensorService.cpp
+@@ -47,6 +47,7 @@
+ #include "RotationVectorSensor.h"
+ #include "SensorFusion.h"
+ #include "SensorService.h"
++#include "Transducer.h"
+ 
+ namespace android {
+ // ---------------------------------------------------------------------------
+@@ -70,10 +71,13 @@ void SensorService::onFirstRef()
+     ALOGD("nuSensorService starting...");
+ 
+     SensorDevice& dev(SensorDevice::getInstance());
++    Transducer& transducer(Transducer::getInstance());
+ 
+     if (dev.initCheck() == NO_ERROR) {
+         sensor_t const* list;
+         ssize_t count = dev.getSensorList(&list);
++
++        ALOGD("nuSensorService getSensorList from device numSensors=%d", count);
+         if (count > 0) {
+             ssize_t orientationIndex = -1;
+             bool hasGyro = false;
+@@ -239,17 +243,26 @@ status_t SensorService::dump(int fd, const Vector<String16>& args)
+ 
+ bool SensorService::threadLoop()
+ {
+-    ALOGD("nuSensorService thread starting...");
++    ALOGD("SensorService::threadLoop()");
+ 
+     const size_t numEventMax = 16;
+     const size_t minBufferSize = numEventMax + numEventMax * mVirtualSensorList.size();
+     sensors_event_t buffer[minBufferSize];
+     sensors_event_t scratch[minBufferSize];
+     SensorDevice& device(SensorDevice::getInstance());
++    Transducer& transducer(Transducer::getInstance());
+     const size_t vcount = mVirtualSensorList.size();
+ 
+     ssize_t count;
+     do {
++    /*
++        count = transducer.poll(buffer, numEventMax);
++        if (count<0) {
++            ALOGE("transducer poll failed (%s)", strerror(-count));
++            break;
++        }
++    */
++
+         count = device.poll(buffer, numEventMax);
+         if (count<0) {
+             ALOGE("sensor poll failed (%s)", strerror(-count));
+@@ -302,10 +315,14 @@ bool SensorService::threadLoop()
+         const SortedVector< wp<SensorEventConnection> > activeConnections(
+                 getActiveConnections());
+         size_t numConnections = activeConnections.size();
++        ALOGD_IF(DEBUG_CONNECTIONS,
++            "SensorService numConnections=%d", activeConnections.size());
+         for (size_t i=0 ; i<numConnections ; i++) {
+             sp<SensorEventConnection> connection(
+                     activeConnections[i].promote());
+             if (connection != 0) {
++                ALOGD_IF(DEBUG_CONNECTIONS,
++                    "SensorService sendEvents to connection uid=%d", connection->getUid());
+                 connection->sendEvents(buffer, count, scratch);
+             }
+         }
+@@ -384,11 +401,17 @@ Vector<Sensor> SensorService::getSensorList()
+ 
+ sp<ISensorEventConnection> SensorService::createSensorEventConnection()
+ {
++    ALOGD_IF(DEBUG_CONNECTIONS, "SensorService::createSensorEventConnection");
+     uid_t uid = IPCThreadState::self()->getCallingUid();
+     sp<SensorEventConnection> result(new SensorEventConnection(this, uid));
+     return result;
+ }
+ 
++sp<BitTube> SensorService::getInputChannel() {
++    ALOGD_IF(DEBUG_CONNECTIONS, "SensorService::getInputChannel()");
++    return Transducer::getInstance().getInputChannel();
++}
++
+ void SensorService::cleanupConnection(SensorEventConnection* c)
+ {
+     Mutex::Autolock _l(mLock);
+@@ -428,11 +451,14 @@ void SensorService::cleanupConnection(SensorEventConnection* c)
+ status_t SensorService::enable(const sp<SensorEventConnection>& connection,
+         int handle)
+ {
++    ALOGD("SensorService::enable");
+     if (mInitCheck != NO_ERROR)
+         return mInitCheck;
+ 
+     Mutex::Autolock _l(mLock);
+     SensorInterface* sensor = mSensorMap.valueFor(handle);
++    ALOGD("SensorService::enable {handle=%d,type=%d,name=%s}",
++        handle, sensor->getSensor().getType(), sensor->getSensor().getName().string());
+     status_t err = sensor ? sensor->activate(connection.get(), true) : status_t(BAD_VALUE);
+     if (err == NO_ERROR) {
+         SensorRecord* rec = mActiveSensors.valueFor(handle);
+@@ -559,15 +585,15 @@ bool SensorService::SensorRecord::removeConnection(
+ // ---------------------------------------------------------------------------
+ 
+ SensorService::SensorEventConnection::SensorEventConnection(
+-        const sp<SensorService>& service, uid_t uid)
+-    : mService(service), mChannel(new BitTube()), mUid(uid)
++    const sp<SensorService>& service, uid_t uid)
++: mService(service), mChannel(new BitTube()), mUid(uid)
+ {
+ }
+ 
+ SensorService::SensorEventConnection::~SensorEventConnection()
+ {
+-    ALOGD_IF(DEBUG_CONNECTIONS, "~SensorEventConnection(%p)", this);
+-    mService->cleanupConnection(this);
++  ALOGD_IF(DEBUG_CONNECTIONS, "~SensorEventConnection(%p)", this);
++  mService->cleanupConnection(this);
+ }
+ 
+ void SensorService::SensorEventConnection::onFirstRef()
+@@ -575,36 +601,40 @@ void SensorService::SensorEventConnection::onFirstRef()
+ }
+ 
+ bool SensorService::SensorEventConnection::addSensor(int32_t handle) {
+-    Mutex::Autolock _l(mConnectionLock);
+-    if (mSensorInfo.indexOf(handle) < 0) {
+-        mSensorInfo.add(handle);
+-        return true;
+-    }
+-    return false;
++  Mutex::Autolock _l(mConnectionLock);
++  ALOGD("SensorEventConnection::addSensor(%d)", handle);
++  if (mSensorInfo.indexOf(handle) < 0) {
++    mSensorInfo.add(handle);
++    return true;
++  }
++  return false;
+ }
+ 
+ bool SensorService::SensorEventConnection::removeSensor(int32_t handle) {
+-    Mutex::Autolock _l(mConnectionLock);
+-    if (mSensorInfo.remove(handle) >= 0) {
+-        return true;
+-    }
+-    return false;
++  Mutex::Autolock _l(mConnectionLock);
++  ALOGD("SensorEventConnection::removeSensor(%d)", handle);
++  if (mSensorInfo.remove(handle) >= 0) {
++    return true;
++  }
++  return false;
+ }
+ 
+ bool SensorService::SensorEventConnection::hasSensor(int32_t handle) const {
+-    Mutex::Autolock _l(mConnectionLock);
+-    return mSensorInfo.indexOf(handle) >= 0;
++  Mutex::Autolock _l(mConnectionLock);
++  return mSensorInfo.indexOf(handle) >= 0;
+ }
+ 
+ bool SensorService::SensorEventConnection::hasAnySensor() const {
+-    Mutex::Autolock _l(mConnectionLock);
+-    return mSensorInfo.size() ? true : false;
++  Mutex::Autolock _l(mConnectionLock);
++  return mSensorInfo.size() ? true : false;
+ }
+ 
+ status_t SensorService::SensorEventConnection::sendEvents(
+         sensors_event_t const* buffer, size_t numEvents,
+         sensors_event_t* scratch)
+ {
++    ALOGD_IF(DEBUG_CONNECTIONS,
++        "SensorEventConnection::sendEvents called");
+     // filter out events not for this connection
+     size_t count = 0;
+     if (scratch) {
+@@ -612,6 +642,12 @@ status_t SensorService::SensorEventConnection::sendEvents(
+         size_t i=0;
+         while (i<numEvents) {
+             const int32_t curr = buffer[i].sensor;
++            ALOGD_IF(DEBUG_CONNECTIONS,
++                "SensorEventConnection processing event from sensor=%d",
++                curr);
++            ALOGD_IF(DEBUG_CONNECTIONS,
++                "SensorEventConnection mSensorInfo.indexOf(sensor)=%d",
++                mSensorInfo.indexOf(curr));
+             if (mSensorInfo.indexOf(curr) >= 0) {
+                 do {
+                     scratch[count++] = buffer[i++];
+@@ -625,6 +661,9 @@ status_t SensorService::SensorEventConnection::sendEvents(
+         count = numEvents;
+     }
+ 
++    ALOGD_IF(DEBUG_CONNECTIONS,
++        "SensorEventConnection, event count after filtering = %d",
++        count);
+     // NOTE: ASensorEvent and sensors_event_t are the same type
+     ssize_t size = SensorEventQueue::write(mChannel,
+             reinterpret_cast<ASensorEvent const*>(scratch), count);
+diff --git a/services/sensorservice/SensorService.h b/services/sensorservice/SensorService.h
+index 18591bf..a5f54d7 100644
+--- a/services/sensorservice/SensorService.h
++++ b/services/sensorservice/SensorService.h
+@@ -65,9 +65,11 @@ class SensorService :
+     // ISensorServer interface
+     virtual Vector<Sensor> getSensorList();
+     virtual sp<ISensorEventConnection> createSensorEventConnection();
++    virtual sp<BitTube> getInputChannel();
+     virtual status_t dump(int fd, const Vector<String16>& args);
+ 
+ 
++
+     class SensorEventConnection : public BnSensorEventConnection {
+         virtual ~SensorEventConnection();
+         virtual void onFirstRef();
+diff --git a/services/sensorservice/Transducer.h b/services/sensorservice/Transducer.h
+new file mode 100644
+index 0000000..924c67d
+--- /dev/null
++++ b/services/sensorservice/Transducer.h
+@@ -0,0 +1,66 @@
++#ifndef ANDROID_TRANSDUCER_H
++#define ANDROID_TRANSDUCER_H
++
++#include <stdint.h>
++#include <time.h>
++#include <unistd.h>
++#include <sys/types.h>
++
++#include <utils/Singleton.h>
++
++#include <gui/BitTube.h>
++
++namespace android {
++// ---------------------------------------------------------------------------
++
++class Transducer : public Singleton<Transducer> {
++    friend class Singleton<Transducer>;
++
++    Transducer() : mInputChannel(new BitTube()) {
++      ALOGD("Transducer::Transducer()");
++    }
++
++    void onFirstRef() {
++    }
++
++    sp<BitTube> const mInputChannel;
++
++public:
++    sp<BitTube> getInputChannel() {
++        return mInputChannel;
++    }
++
++    ssize_t poll(sensors_event_t* buffer, size_t numMaxEvents) {
++        sleep(1);
++        ssize_t numEvents = BitTube::recvObjects(mInputChannel, buffer, numMaxEvents);
++        return numEvents;
++    }
++
++    void fillWithSyntheticEvents(sensors_event_t* buffer, size_t numMaxEvents) const {
++        for (size_t ii = 0; ii < numMaxEvents/2; ++ii) {
++            sensors_event_t& event_out = buffer[ii];
++            event_out.version = sizeof(struct sensors_event_t);
++            // FIXME: The .sensor field should be an id,
++            // not its type.
++            event_out.sensor = SENSOR_TYPE_ACCELEROMETER;
++            event_out.type = SENSOR_TYPE_ACCELEROMETER;
++            event_out.acceleration.x = -1.3;
++            event_out.acceleration.y = 1.8;
++            event_out.acceleration.z = -0.7;
++            event_out.timestamp = now_nanosec();
++        }
++    }
++
++    int64_t now_nanosec() const {
++        struct timespec now;
++        clock_gettime(CLOCK_MONOTONIC, &now);
++        return (int64_t) now.tv_sec*1000000000LL + now.tv_nsec;
++    }
++};
++
++ANDROID_SINGLETON_STATIC_INSTANCE(Transducer)
++
++// ---------------------------------------------------------------------------
++}; // namespace android
++
++#endif
+diff --git a/services/sensorservice/tests/sensorservicetest.cpp b/services/sensorservice/tests/sensorservicetest.cpp
+index 1025fa8..69ff596 100644
+--- a/services/sensorservice/tests/sensorservicetest.cpp
++++ b/services/sensorservice/tests/sensorservicetest.cpp
+@@ -61,7 +61,7 @@ int receiver(int fd, int events, void* data)
+ 
+ int main(int argc, char** argv)
+ {
+-    SensorManager& mgr(SensorManager::getInstance());
++    SensorManager& mgr(SensorManager::getServerHandle());
+ 
+     Sensor const* const* list;
+     ssize_t count = mgr.getSensorList(&list);
